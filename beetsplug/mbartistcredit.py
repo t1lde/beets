@@ -18,9 +18,6 @@ ArtistReleaseData = namedtuple("ArtistReleaseData",
 AlbumNameHoles = namedtuple("AlbumNameHoles",
                             ("album", "tracks"))
 
-TrackNameHole = namedtuple("TrackNameHole",
-                           ("track_id", "credits"))
-
 BROWSE_INCLUDES = ['artist-credits', 'aliases']
 
 class MbArtistCreditPlugin(plugins.BeetsPlugin):
@@ -29,7 +26,8 @@ class MbArtistCreditPlugin(plugins.BeetsPlugin):
 
         self.register_listener('albuminfo_received', self.album_info_handler)
         self.register_listener('trackinfo_received', self.track_info_handler)
-        self.register_listener('before_choose_candidate', self.before_choice_handler)
+        # self.register_listener('before_choose_candidate', self.before_choice_handler)
+        self.register_listner('import_task_choice', self.import_task_choice_handler)
 
         # A set of artists for which the user needs to choose a preferred name for
         # album_id/track_id: set(artist_id)
@@ -110,7 +108,7 @@ class MbArtistCreditPlugin(plugins.BeetsPlugin):
 
         # Acquire list of credited artists, and construct album name holes
         credited_artists = []
-        holes = AlbumNameHoles(album=None, tracks=[])
+        holes = AlbumNameHoles(album=None, tracks={})
         album_credit = album_data['artist-credit']
         credited_artists.append(album_credit)
         holes.album = album_credit
@@ -119,7 +117,7 @@ class MbArtistCreditPlugin(plugins.BeetsPlugin):
             track_cred = track.get('artist-credit')
             if track_cred is None:
                 continue
-            holes.tracks.append(TrackNameHole(track['id'], track_cred))
+            holes.tracks[track['id']] = track_cred
             credited_artists.extend(track_cred)
 
         self.album_holes[album_id] = holes
@@ -150,41 +148,92 @@ class MbArtistCreditPlugin(plugins.BeetsPlugin):
     def track_info_handler(self, info):
         self._log.debug(u'Recieved trackinfo: {0}', info)
 
-    def before_choice_handler(self, session, task):
-        self._log.debug(u'Recieved before_choice_handler: {0}', task)
+    def import_task_choice_handler(self, session, task):
+        self._log.debug(u'Recieved import_stage: {0}', task)
         if not task.is_album:
             return
         album_id = task.album.album_id
         if album_id is None:
             return
 
-        choices = []
         artist_choices = self.choices[album_id]
         for artist_id in artist_choices:
-            alts = self.artist_data[choice].name_choice
-            #if alts.user_choice is not None:
-                #continue
-            #if alts.alias_name is not None:
-                #self.artist_data[choice].user_choice = alts.alias_name
-                #continue
-            #if (alts.credited_name is None) or (alts.canon_name == alts.credited_name):
-                #self.artist_data[choice].user_choice = alts.canon_name
+            alts = self.artist_data[artist_id].name_choice
+            if alts.user_choice is not None:
+                continue
 
-            choices.append(PromptChoice('1', "Musicbrainz Canonical Name", choice_canon_name))
-            choices.append(PromptChoice('2', "Artist Credited Name", choice_credit_name))
+            user_choices = self._get_choices(alts)
 
-        return choices
+            if len(user_choices) == 1:
+                self.artist_data[artist_id].name_choice.user_choice = user_choices[0][0]
+                continue
 
-    def choice_canon_name(self, session, task):
-        pass
+            opt_num = 0
+            msg = "Multiple Possible Alternative Names for {name}:".format(name=alts.canon_name)
+            ui._print(msg)
 
-    def choice_credit_name(self, session, task):
-        pass
+            for name, prompt in user_choices:
+                opt_num += 1
+                name_print = ui.colorize('action', name)
+                option_print = "{num}. {prompt}: {name}".format(name=name_print,
+                                                                num=opt_num,
+                                                                prompt=prompt)
+                ui.print_(option_print)
 
+            choice_prompt = "Please choose a name (as numbered)."
+            response = ui.input_options([],
+                                        prompt=choice_prompt,
+                                        numrange=(1, opt_num))
 
+            self.artist_data[artist_id].name_choice.user_choice = user_choice[int(response)][1]
 
-       
+        self._apply_choices(task)
+        # TODO: Figure out what plugin data we can throwaway here... (oops)
 
+    def _get_name(self, cred):
+        if isinstance(cred, six.string_types):
+            return cred
+
+        artist_id = cred['artist']['id']
+        name = self.artists_data[artist_id].name_choice.user_choice
+        return name
+
+    def _apply_choices(self, task):
+        album_id = task.album.album_id
+        holes = self.album_holes[album_id]
+
+        album_artist_name = ''.join([self._get_name(x) for x in holes.album])
+        track_artists = {}
+
+        # Construct the track names in advance
+        for track_id, track_creds in holes.tracks.items():
+            track_artist = ''.join([self._get_name(x) for x in track_creds])
+            track_artists[track_id] = track_name
+
+        # Apply the album artist name
+        task.album.artist = album_artist_name
+
+        # Apply the track artist names
+        for track in task.album.tracks:
+            track_id = track.release_track_id
+            track.artist = track_names[track_id]
+
+    def _get_choices(self, name_alts):
+        """ Constructs the name choices to offer to the user
+        as a list of tuples of the names, and a description of the name
+        to show the user when offering the choice
+        (dependent on config)
+        """
+        choices = []
+        choices.append((name_alts.canon_name, "Musicbrainz Canonical Name"))
+        if (name_alts.alias_name is not None) and \
+           (name_alts.alias_name != name_alts.canon_name):
+            choices.append((name_alts.alias_name, "Localised Alias"))
+
+        if (name_alts.credited_name is not None) and \
+           (name_alts.credited_name != name_alts.canon_name) and \
+           (name_alts.credited_name != name_alts.alias_name):
+            choies.append((name_alts.credited_name, "Artist Credited Name"))
 
 _ISO_639_1_TO_3 = {
     'aa': 'aar',
